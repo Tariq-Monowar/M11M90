@@ -1,13 +1,1514 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>frontend</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
-  </body>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Meeting</title>
+    <script src="https://cdn.socket.io/4.8.3/socket.io.min.js"></script>
+    <script type="module">
+        // Load mediasoup-client using Skypack (reliable ES module CDN)
+        import * as mediasoupClient from 'https://cdn.skypack.dev/mediasoup-client@3.6.92';
+        window.mediasoupClient = mediasoupClient;
+        console.log('✅ mediasoup-client loaded via Skypack');
+        
+        // Also set a flag so other scripts know it's ready
+        window.mediasoupClientReady = true;
+        window.dispatchEvent(new Event('mediasoupClientReady'));
+    </script>
+    <script>
+        // Wait for mediasoup-client to be ready (for non-module code)
+        if (!window.mediasoupClient) {
+            window.addEventListener('mediasoupClientReady', function() {
+                console.log('mediasoup-client is now available');
+            });
+        }
+    </script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            color: #333;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .header {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .header h1 {
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+
+        .status {
+            display: inline-block;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: 500;
+            margin-top: 10px;
+        }
+
+        .status.connected {
+            background: #10b981;
+            color: white;
+        }
+
+        .status.disconnected {
+            background: #ef4444;
+            color: white;
+        }
+
+        .status.in-call {
+            background: #3b82f6;
+            color: white;
+        }
+
+        .setup-section {
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .setup-section h2 {
+            color: #667eea;
+            margin-bottom: 20px;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+            color: #555;
+        }
+
+        .form-group input,
+        .form-group select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            margin-right: 10px;
+            margin-top: 10px;
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-danger {
+            background: #ef4444;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #dc2626;
+        }
+
+        .btn-secondary {
+            background: #6b7280;
+            color: white;
+        }
+
+        .btn-secondary:hover {
+            background: #4b5563;
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .users-list {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .users-list h3 {
+            color: #667eea;
+            margin-bottom: 15px;
+        }
+
+        .user-item {
+            padding: 12px;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .user-item:hover {
+            background: #f9fafb;
+        }
+
+        .video-section {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            display: none;
+        }
+
+        .video-section.active {
+            display: block;
+        }
+
+        .video-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .video-container {
+            position: relative;
+            background: #000;
+            border-radius: 12px;
+            overflow: hidden;
+            aspect-ratio: 16/9;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        }
+
+        .video-container video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            background: #000;
+            display: block;
+        }
+        
+        .video-container video:not([src]):not([srcObject]) {
+            background: #1a1a1a;
+        }
+
+        .video-label {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .video-controls {
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            display: flex;
+            gap: 10px;
+        }
+
+        .control-btn {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            border: none;
+            background: rgba(255, 255, 255, 0.2);
+            color: white;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            transition: all 0.3s;
+            backdrop-filter: blur(10px);
+        }
+
+        .control-btn:hover {
+            background: rgba(255, 255, 255, 0.3);
+            transform: scale(1.1);
+        }
+
+        .control-btn.muted {
+            background: #ef4444;
+        }
+
+        .control-btn.video-off {
+            background: #6b7280;
+        }
+
+        .controls-bar {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            padding: 20px;
+            background: #f9fafb;
+            border-radius: 12px;
+            margin-top: 20px;
+        }
+
+        .controls-bar .btn {
+            min-width: 120px;
+        }
+
+        .error {
+            background: #fee2e2;
+            color: #991b1b;
+            padding: 12px;
+            border-radius: 8px;
+            margin-top: 10px;
+            display: none;
+        }
+
+        .error.show {
+            display: block;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: #6b7280;
+        }
+
+        @media (max-width: 768px) {
+            .video-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎥 Professional Video Meeting</h1>
+            <div class="status disconnected" id="status">Disconnected</div>
+        </div>
+
+        <div class="setup-section" id="setupSection">
+            <h2>Setup</h2>
+            <div class="form-group">
+                <label for="username">Your Name</label>
+                <input type="text" id="username" placeholder="Enter your name" value="User">
+            </div>
+            <div class="form-group">
+                <label for="roomId">Room ID</label>
+                <input type="text" id="roomId" placeholder="Enter room ID" value="room-1">
+            </div>
+            <button class="btn btn-primary" onclick="connect()">Connect & Join Room</button>
+            <div class="error" id="error"></div>
+        </div>
+
+        <div class="users-list" id="usersList" style="display: none;">
+            <h3>Users in Database</h3>
+            <div id="usersContainer">
+                <div class="loading">Loading users...</div>
+            </div>
+            <button class="btn btn-secondary" onclick="loadUsers()">Refresh Users</button>
+        </div>
+
+        <div class="video-section" id="videoSection">
+            <h2 style="color: #667eea; margin-bottom: 20px;">Video Call</h2>
+            <div class="video-grid" id="videoGrid"></div>
+            <div class="controls-bar">
+                <button class="btn btn-primary" id="toggleAudio" onclick="toggleAudio()">
+                    🔊 Unmute
+                </button>
+                <button class="btn btn-primary" id="toggleVideo" onclick="toggleVideo()">
+                    📹 Video On
+                </button>
+                <button class="btn btn-danger" onclick="leaveRoom()">Leave Call</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Configuration
+        const SERVER_URL = 'http://localhost:3000';
+        let socket = null;
+        let device = null;
+
+        // Wait for mediasoup-client to load
+        function waitForMediasoupClient() {
+            return new Promise((resolve, reject) => {
+                // If already ready, resolve immediately
+                if (window.mediasoupClient && window.mediasoupClient.Device) {
+                    resolve();
+                    return;
+                }
+                
+                // Wait for the ready event
+                const onReady = () => {
+                    if (window.mediasoupClient && window.mediasoupClient.Device) {
+                        resolve();
+                    }
+                };
+                
+                window.addEventListener('mediasoupClientReady', onReady);
+                
+                // Also poll as fallback
+                let attempts = 0;
+                const maxAttempts = 100; // 10 seconds
+                
+                const check = () => {
+                    const mediasoup = window.mediasoupClient;
+                    if (mediasoup && mediasoup.Device) {
+                        window.removeEventListener('mediasoupClientReady', onReady);
+                        resolve();
+                    } else if (attempts < maxAttempts) {
+                        attempts++;
+                        setTimeout(check, 100);
+                    } else {
+                        window.removeEventListener('mediasoupClientReady', onReady);
+                        reject(new Error(
+                            'mediasoup-client failed to load after 10 seconds. ' +
+                            'This might be due to:\n' +
+                            '1. Network connectivity issues\n' +
+                            '2. CORS restrictions\n' +
+                            '3. Browser blocking the CDN\n\n' +
+                            'Please refresh the page or check the browser console.'
+                        ));
+                    }
+                };
+                
+                check();
+            });
+        }
+        let sendTransport = null;
+        let recvTransport = null;
+        let recvTransportConnected = false; // Track recv transport connection state
+        let producers = new Map();
+        let consumers = new Map();
+        let producerToSocket = new Map(); // Track which producer belongs to which socket
+        let socketToStream = new Map(); // Track streams per socket (to combine audio/video)
+        let localStream = null;
+        let currentRoomId = null;
+        let isAudioEnabled = true;
+        let isVideoEnabled = true;
+
+        // Initialize
+        async function connect() {
+            try {
+                const username = document.getElementById('username').value;
+                const roomId = document.getElementById('roomId').value;
+
+                if (!username || !roomId) {
+                    showError('Please enter your name and room ID');
+                    return;
+                }
+
+                // Connect to Socket.IO
+                socket = io(SERVER_URL);
+                updateStatus('connecting');
+
+                socket.on('connect', async () => {
+                    console.log('Socket connected');
+                    updateStatus('connected');
+                    await joinRoom(roomId);
+                });
+
+                socket.on('disconnect', () => {
+                    console.log('Socket disconnected');
+                    updateStatus('disconnected');
+                });
+
+                socket.on('newProducer', async ({ producerId, kind, socketId }) => {
+                    console.log('🔔 New producer event received:', { producerId, kind, socketId });
+                    
+                    if (socketId === socket.id) {
+                        console.log('⚠️ Ignoring own producer');
+                        return;
+                    }
+
+                    // Wait for recv transport and device to be ready
+                    let retries = 0;
+                    while ((!recvTransport || !device || !device.loaded) && retries < 30) {
+                        await new Promise(resolve => setTimeout(resolve, 200));
+                        retries++;
+                    }
+
+                    if (!recvTransport) {
+                        console.error(`❌ Recv transport not ready after waiting, cannot consume producer ${producerId}`);
+                        return;
+                    }
+
+                    if (!device || !device.loaded) {
+                        console.error(`❌ Device not loaded after waiting, cannot consume producer ${producerId}`);
+                        return;
+                    }
+
+                    console.log(`📥 Consuming new producer: ${producerId} (${kind}) from ${socketId}`);
+                    producerToSocket.set(producerId, socketId);
+                    
+                    try {
+                        await consumeProducer(producerId, kind);
+                    } catch (error) {
+                        console.error(`❌ Failed to consume new producer ${producerId}:`, error);
+                    }
+                });
+
+                socket.on('participantLeft', ({ socketId }) => {
+                    console.log('Participant left:', socketId);
+                    removeParticipant(socketId);
+                });
+
+            } catch (error) {
+                console.error('Connection error:', error);
+                showError('Failed to connect: ' + error.message);
+            }
+        }
+
+        async function joinRoom(roomId) {
+            try {
+                currentRoomId = roomId;
+                updateStatus('in-call');
+
+                // Wait for mediasoup-client to be available
+                await waitForMediasoupClient();
+
+                // Create or join room
+                const { rtpCapabilities } = await socketRequest('createRoom', { roomId });
+                console.log('Room joined, RTP capabilities:', rtpCapabilities);
+
+                // Get mediasoupClient reference
+                const mediasoup = window.mediasoupClient || mediasoupClient || window.mediasoup;
+                if (!mediasoup) {
+                    throw new Error('mediasoup-client library not loaded. Please refresh the page.');
+                }
+
+                // Create mediasoup device
+                device = new mediasoup.Device();
+                await device.load({ routerRtpCapabilities: rtpCapabilities });
+                console.log('Device loaded');
+
+                // Create send transport
+                await createSendTransport();
+
+                // Create recv transport
+                await createRecvTransport();
+                
+                // Wait for transports to be ready
+                await new Promise(resolve => setTimeout(resolve, 800));
+
+                // Start producing local media
+                await produceMedia();
+                
+                // Wait for producers to be registered
+                await new Promise(resolve => setTimeout(resolve, 500));
+
+                // Get existing producers
+                const { producers: existingProducers } = await socketRequest('getProducers');
+                console.log('📋 Existing producers in room:', existingProducers);
+
+                // Consume existing producers
+                if (recvTransport && device && device.loaded) {
+                    for (const producer of existingProducers) {
+                        if (producer.socketId === socket.id) {
+                            console.log(`⚠️ Skipping own producer ${producer.id}`);
+                            continue;
+                        }
+                        
+                        console.log(`📥 Consuming existing producer: ${producer.id} (${producer.kind}) from ${producer.socketId}`);
+                        producerToSocket.set(producer.id, producer.socketId);
+                        
+                        try {
+                            await consumeProducer(producer.id, producer.kind);
+                            // Small delay between consumers
+                            await new Promise(resolve => setTimeout(resolve, 200));
+                        } catch (error) {
+                            console.error(`❌ Failed to consume producer ${producer.id}:`, error);
+                        }
+                    }
+                } else {
+                    console.warn('⚠️ Cannot consume producers: recvTransport or device not ready');
+                }
+
+                // Initialize button states
+                document.getElementById('toggleAudio').textContent = '🔊 Unmute';
+                document.getElementById('toggleVideo').textContent = '📹 Video On';
+
+                // Show video section
+                document.getElementById('setupSection').style.display = 'none';
+                document.getElementById('videoSection').classList.add('active');
+                document.getElementById('usersList').style.display = 'block';
+                loadUsers();
+
+            } catch (error) {
+                console.error('Join room error:', error);
+                showError('Failed to join room: ' + error.message);
+            }
+        }
+
+        async function createSendTransport() {
+            const { id, iceParameters, iceCandidates, dtlsParameters } = await socketRequest('createTransport', { type: 'send' });
+
+            sendTransport = device.createSendTransport({
+                id,
+                iceParameters,
+                iceCandidates,
+                dtlsParameters,
+            });
+
+            sendTransport.on('connect', async ({ dtlsParameters }, callback, errback) => {
+                try {
+                    console.log('Connecting send transport...');
+                    await socketRequest('connectTransport', {
+                        transportId: sendTransport.id,
+                        dtlsParameters,
+                    });
+                    console.log('✅ Send transport connected');
+                    callback();
+                } catch (error) {
+                    console.error('❌ Send transport connection error:', error);
+                    errback(error);
+                }
+            });
+
+            sendTransport.on('connectionstatechange', (state) => {
+                console.log('Send transport connection state:', state);
+            });
+
+            sendTransport.on('produce', async ({ kind, rtpParameters }, callback, errback) => {
+                try {
+                    console.log(`Producing ${kind}...`);
+                    const { id } = await socketRequest('produce', {
+                        transportId: sendTransport.id,
+                        kind,
+                        rtpParameters,
+                    });
+                    console.log(`✅ Producer created: ${id} (${kind})`);
+                    callback({ id });
+                } catch (error) {
+                    console.error('❌ Produce error:', error);
+                    errback(error);
+                }
+            });
+        }
+
+        async function createRecvTransport() {
+            const { id, iceParameters, iceCandidates, dtlsParameters } = await socketRequest('createTransport', { type: 'recv' });
+
+            recvTransport = device.createRecvTransport({
+                id,
+                iceParameters,
+                iceCandidates,
+                dtlsParameters,
+            });
+
+            recvTransport.on('connect', async ({ dtlsParameters }, callback, errback) => {
+                try {
+                    console.log('Connecting recv transport...');
+                    await socketRequest('connectTransport', {
+                        transportId: recvTransport.id,
+                        dtlsParameters,
+                    });
+                    recvTransportConnected = true;
+                    recvTransport._connected = true;
+                    console.log('✅ Recv transport connected, state:', recvTransport.connectionState);
+                    callback();
+                } catch (error) {
+                    console.error('❌ Recv transport connection error:', error);
+                    recvTransportConnected = false;
+                    recvTransport._connected = false;
+                    errback(error);
+                }
+            });
+
+            recvTransport.on('connectionstatechange', (state) => {
+                console.log(`📡 Recv transport connection state: ${state}`);
+                if (state === 'connected' || state === 'completed') {
+                    recvTransportConnected = true;
+                    recvTransport._connected = true;
+                } else if (state === 'failed' || state === 'disconnected') {
+                    recvTransportConnected = false;
+                    recvTransport._connected = false;
+                    console.error('Recv transport connection failed or disconnected');
+                }
+            });
+        }
+
+        async function produceMedia() {
+            try {
+                // Get user media
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: true,
+                    video: { width: 1280, height: 720 },
+                });
+
+                localStream = stream;
+                addLocalVideo(stream);
+
+                // Produce audio
+                const audioTrack = stream.getAudioTracks()[0];
+                if (audioTrack) {
+                    const audioProducer = await sendTransport.produce({ track: audioTrack });
+                    producers.set('audio', audioProducer);
+                    // Also store by producer ID for tracking
+                    producers.set(audioProducer.id, audioProducer);
+                    console.log(`✅ Audio producer created: ${audioProducer.id}`);
+                }
+
+                // Produce video
+                const videoTrack = stream.getVideoTracks()[0];
+                if (videoTrack) {
+                    const videoProducer = await sendTransport.produce({ track: videoTrack });
+                    producers.set('video', videoProducer);
+                    // Also store by producer ID for tracking
+                    producers.set(videoProducer.id, videoProducer);
+                    console.log(`✅ Video producer created: ${videoProducer.id}`);
+                }
+
+            } catch (error) {
+                console.error('Error producing media:', error);
+                showError('Failed to access camera/microphone: ' + error.message);
+            }
+        }
+
+        async function consumeProducer(producerId, kind = null) {
+            try {
+                if (consumers.has(producerId)) {
+                    console.log(`⚠️ Already consuming producer ${producerId}, skipping`);
+                    return;
+                }
+
+                if (!recvTransport) {
+                    throw new Error('Recv transport not ready');
+                }
+
+                if (!device || !device.loaded) {
+                    throw new Error('Device not loaded');
+                }
+
+                const socketId = producerToSocket.get(producerId);
+                if (!socketId) {
+                    console.warn(`⚠️ No socketId found for producer ${producerId}`);
+                }
+
+                if (socketId === socket.id) {
+                    console.log(`⚠️ Skipping own producer ${producerId}`);
+                    return;
+                }
+
+                // Wait for transport to be connected (with timeout)
+                let retries = 0;
+                while (
+                    recvTransport.connectionState !== 'connected' &&
+                    recvTransport.connectionState !== 'completed' &&
+                    retries < 20
+                ) {
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                    retries++;
+                }
+
+                if (recvTransport.connectionState !== 'connected' && 
+                    recvTransport.connectionState !== 'completed') {
+                    console.warn(`⚠️ Recv transport state: ${recvTransport.connectionState}, proceeding anyway...`);
+                }
+
+                console.log(`📥 Consuming producer ${producerId} (${kind}) from socket ${socketId}...`);
+                
+                // Request consumer creation from server
+                const { id, producerId: prodId, kind: mediaKind, rtpParameters } = await socketRequest('consume', {
+                    transportId: recvTransport.id,
+                    producerId,
+                    rtpCapabilities: device.rtpCapabilities,
+                });
+
+                console.log(`Server created consumer ${id} for producer ${prodId}`);
+
+                // Create consumer on the recv transport using server-provided parameters
+                const consumer = await recvTransport.consume({
+                    id,
+                    producerId: prodId,
+                    kind: mediaKind,
+                    rtpParameters,
+                });
+
+                console.log(`Consumer created locally, track ID: ${consumer.track.id}, kind: ${consumer.kind}`);
+                console.log(`Consumer paused state: ${consumer.paused}`);
+                console.log(`Consumer closed state: ${consumer.closed}`);
+
+                // Store consumer by producerId
+                consumers.set(producerId, consumer);
+
+                // Ensure track is enabled
+                consumer.track.enabled = true;
+
+                // Resume consumer on server
+                try {
+                    await socketRequest('resumeConsumer', { consumerId: consumer.id });
+                    console.log(`✅ Consumer ${id} resumed on server`);
+                } catch (error) {
+                    console.warn(`⚠️ Failed to resume consumer on server:`, error);
+                }
+
+                // Wait a bit for video tracks
+                if (mediaKind === 'video') {
+                    await new Promise(resolve => setTimeout(resolve, 300));
+                }
+
+                // Get track and add to video element
+                const { track } = consumer;
+                
+                if (!track) {
+                    console.error(`❌ No track in consumer for producer ${producerId}`);
+                    throw new Error('Consumer has no track');
+                }
+                
+                // Ensure track is enabled and active
+                track.enabled = true;
+                
+                console.log(`✅ Consuming ${mediaKind} track from producer ${producerId}`);
+                console.log(`   Track ID: ${track.id}`);
+                console.log(`   Track enabled: ${track.enabled}`);
+                console.log(`   Track readyState: ${track.readyState}`);
+                console.log(`   Track muted: ${track.muted}`);
+                console.log(`   Track settings:`, track.getSettings ? track.getSettings() : 'N/A');
+                console.log(`   Track constraints:`, track.getConstraints ? track.getConstraints() : 'N/A');
+                
+                // Wait a bit for track to become active (especially for video tracks)
+                if (mediaKind === 'video') {
+                    console.log(`⏳ Waiting for video track to become active...`);
+                    let waitCount = 0;
+                    while (track.readyState !== 'live' && waitCount < 50) {
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                        waitCount++;
+                    }
+                    if (track.readyState === 'live') {
+                        console.log(`✅ Video track is now live after ${waitCount * 100}ms`);
+                    } else {
+                        console.warn(`⚠️ Video track readyState is still ${track.readyState} after waiting`);
+                    }
+                }
+                
+                // Monitor track state
+                track.onended = () => {
+                    console.log(`🔴 Track ${track.id} ended`);
+                    // Remove the track from the stream
+                    const socketId = producerToSocket.get(producerId);
+                    if (socketId) {
+                        const stream = socketToStream.get(socketId);
+                        if (stream) {
+                            stream.removeTrack(track);
+                        }
+                    }
+                };
+                track.onmute = () => {
+                    console.log(`🔇 Track ${track.id} muted`);
+                };
+                track.onunmute = () => {
+                    console.log(`🔊 Track ${track.id} unmuted`);
+                    track.enabled = true;
+                };
+                
+                // Monitor track state changes
+                if (track.addEventListener) {
+                    track.addEventListener('ended', () => {
+                        console.log(`🔴 Track ${track.id} ended (via addEventListener)`);
+                    });
+                }
+                
+                // CRITICAL: For video tracks, verify consumer is actually receiving data
+                if (mediaKind === 'video') {
+                    // Wait a moment for consumer to start receiving
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    
+                    // Check consumer state
+                    console.log(`📊 Consumer state check:`);
+                    console.log(`   Consumer paused: ${consumer.paused}`);
+                    console.log(`   Consumer closed: ${consumer.closed}`);
+                    console.log(`   Track readyState: ${track.readyState}`);
+                    console.log(`   Track enabled: ${track.enabled}`);
+                    
+                    // CRITICAL: Verify track is receiving frames using canvas
+                    try {
+                        const canvas = document.createElement('canvas');
+                        const ctx = canvas.getContext('2d');
+                        const testStream = new MediaStream([track]);
+                        const testVideo = document.createElement('video');
+                        testVideo.srcObject = testStream;
+                        testVideo.muted = true;
+                        testVideo.playsInline = true;
+                        
+                        await new Promise((resolve) => {
+                            testVideo.onloadedmetadata = () => {
+                                testVideo.play().then(() => {
+                                    // Try to draw a frame after a short delay
+                                    setTimeout(() => {
+                                        try {
+                                            canvas.width = testVideo.videoWidth || 640;
+                                            canvas.height = testVideo.videoHeight || 480;
+                                            ctx.drawImage(testVideo, 0, 0);
+                                            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                                            const hasData = imageData.data.some(pixel => pixel !== 0);
+                                            if (hasData) {
+                                                console.log(`✅ Track IS producing frames! Canvas test successful`);
+                                            } else {
+                                                console.warn(`⚠️ Track may not be producing frames - canvas is blank`);
+                                            }
+                                            testVideo.srcObject = null;
+                                            resolve();
+                                        } catch (e) {
+                                            console.warn(`⚠️ Canvas test error:`, e.message);
+                                            resolve();
+                                        }
+                                    }, 500);
+                                }).catch(e => {
+                                    console.warn(`⚠️ Test video play failed:`, e.message);
+                                    resolve();
+                                });
+                            };
+                            testVideo.onerror = () => {
+                                console.warn(`⚠️ Test video error`);
+                                resolve();
+                            };
+                        });
+                    } catch (e) {
+                        console.warn(`⚠️ Frame verification test failed:`, e.message);
+                    }
+                }
+                
+                // Add track to video element
+                console.log(`🎬 Adding ${mediaKind} track to video element for producer ${producerId}`);
+                await addRemoteVideo(track, producerId, mediaKind);
+                console.log(`✅ Track added to video element for producer ${producerId}`);
+
+            } catch (error) {
+                console.error('Error consuming producer:', error);
+                // Don't show error to user for every failed consume, just log it
+                console.error(`Failed to consume producer ${producerId}: ${error.message}`);
+            }
+        }
+
+        function addLocalVideo(stream) {
+            const videoGrid = document.getElementById('videoGrid');
+            const videoContainer = document.createElement('div');
+            videoContainer.className = 'video-container';
+            videoContainer.id = 'local-video';
+
+            const video = document.createElement('video');
+            video.srcObject = stream;
+            video.autoplay = true;
+            video.playsInline = true;
+            video.muted = true;
+
+            const label = document.createElement('div');
+            label.className = 'video-label';
+            label.textContent = 'You (Local)';
+
+            videoContainer.appendChild(video);
+            videoContainer.appendChild(label);
+            videoGrid.appendChild(videoContainer);
+        }
+
+        async function addRemoteVideo(track, producerId, kind) {
+            console.log(`\n🎬 addRemoteVideo called: producerId=${producerId}, kind=${kind}, trackId=${track.id}`);
+            
+            const socketId = producerToSocket.get(producerId);
+            if (!socketId) {
+                console.error('❌ CRITICAL ERROR: No socketId found for producer:', producerId);
+                console.error('   Current producerToSocket map:', Array.from(producerToSocket.entries()));
+                console.error('   This track will NOT be displayed!');
+                return;
+            }
+            
+            console.log(`✅ Found socketId: ${socketId} for producer ${producerId}`);
+
+            const videoGrid = document.getElementById('videoGrid');
+            
+            // SIMPLIFIED: Use ONE stream per socket, just add/remove tracks
+            let stream = socketToStream.get(socketId);
+            
+            if (!stream) {
+                // First track - create new stream
+                stream = new MediaStream();
+                stream.addTrack(track);
+                socketToStream.set(socketId, stream);
+                console.log(`📦 Created NEW stream for socket ${socketId} with ${kind} track`);
+            } else {
+                // Check if track already exists in stream
+                const existingTrack = stream.getTracks().find(t => t.id === track.id);
+                if (!existingTrack) {
+                    // Just add the track to existing stream
+                    stream.addTrack(track);
+                    console.log(`✅ Added ${kind} track to existing stream for socket ${socketId}`);
+                } else {
+                    console.log(`⚠️ Track ${track.id} already in stream, skipping`);
+                }
+            }
+            
+            // Verify track is in stream
+            const existingTrack = stream.getTracks().find(t => t.id === track.id);
+            if (!existingTrack) {
+                console.error(`❌ Track ${track.id} was not added to stream!`);
+                throw new Error(`Track ${track.id} was not added to stream`);
+            }
+            
+            // Ensure track is enabled and active
+            track.enabled = true;
+            console.log(`✅ Track enabled: ${track.enabled}, readyState: ${track.readyState}, kind: ${track.kind}`);
+            
+            // For video tracks, verify it's live and producing frames
+            if (kind === 'video') {
+                if (track.readyState !== 'live') {
+                    console.warn(`⚠️ Video track readyState is ${track.readyState}, expected 'live'`);
+                    // Wait a bit more for it to become live
+                    let waitCount = 0;
+                    while (track.readyState !== 'live' && waitCount < 20) {
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                        waitCount++;
+                    }
+                    if (track.readyState !== 'live') {
+                        console.error(`❌ Video track never became live! Current state: ${track.readyState}`);
+                    } else {
+                        console.log(`✅ Video track became live after ${waitCount * 100}ms`);
+                    }
+                }
+                
+                // Verify track is actually producing frames by checking its settings
+                try {
+                    const settings = track.getSettings();
+                    console.log(`📹 Video track settings:`, settings);
+                    if (settings.width && settings.height) {
+                        console.log(`✅ Video track has dimensions: ${settings.width}x${settings.height}`);
+                    } else {
+                        console.warn(`⚠️ Video track has no dimensions in settings`);
+                    }
+                } catch (e) {
+                    console.warn(`⚠️ Could not get track settings:`, e);
+                }
+            }
+            
+            console.log(`✅ Added ${kind} track to stream for socket ${socketId}`);
+            console.log(`   Track ID: ${track.id}`);
+            console.log(`   Stream now has ${stream.getTracks().length} tracks`);
+            console.log(`   Video tracks: ${stream.getVideoTracks().length}`);
+            console.log(`   Audio tracks: ${stream.getAudioTracks().length}`);
+            
+            // Verify the track is actually in the stream
+            const trackInStream = stream.getTracks().find(t => t.id === track.id);
+            if (!trackInStream) {
+                console.error(`❌ CRITICAL: Track ${track.id} is NOT in stream after adding!`);
+                throw new Error(`Track ${track.id} is not in stream`);
+            }
+            console.log(`✅ Verified track ${track.id} is in stream`);
+            
+            // Check if video container already exists for this socket
+            let videoContainer = document.getElementById(`remote-${socketId}`);
+            let video = document.getElementById(`video-${socketId}`);
+            
+            if (!videoContainer || !video) {
+                // Create video container if it doesn't exist
+                if (!videoContainer) {
+                    videoContainer = document.createElement('div');
+                    videoContainer.className = 'video-container';
+                    videoContainer.id = `remote-${socketId}`;
+                    videoGrid.appendChild(videoContainer);
+                    
+                    // CRITICAL: Ensure container is visible and has dimensions
+                    videoContainer.style.display = 'block';
+                    videoContainer.style.visibility = 'visible';
+                    void videoContainer.offsetWidth; // Force reflow
+                    
+                    console.log(`📦 Created video container for ${socketId}`);
+                }
+
+                // Create video element if it doesn't exist
+                if (!video) {
+                    video = document.createElement('video');
+                    video.id = `video-${socketId}`;
+                    video.autoplay = true;
+                    video.playsInline = true;
+                    video.muted = false; // Unmute remote audio
+                    video.setAttribute('playsinline', 'true');
+                    video.setAttribute('webkit-playsinline', 'true');
+                    video.style.width = '100%';
+                    video.style.height = '100%';
+                    video.style.objectFit = 'cover';
+                    video.style.display = 'block';
+                    video.style.visibility = 'visible';
+                    video.style.opacity = '1';
+                    video.style.backgroundColor = '#000';
+                    
+                    const label = document.createElement('div');
+                    label.className = 'video-label';
+                    label.textContent = 'Participant';
+
+                    videoContainer.appendChild(video);
+                    videoContainer.appendChild(label);
+                    
+                    // CRITICAL: Wait for element to be in DOM and force reflow
+                    await new Promise(resolve => requestAnimationFrame(resolve));
+                    void video.offsetWidth; // Force reflow
+                    
+                    console.log(`📹 Created new video element for ${socketId}`);
+                }
+            } else {
+                // Ensure existing elements are visible
+                videoContainer.style.display = 'block';
+                videoContainer.style.visibility = 'visible';
+                video.style.display = 'block';
+                video.style.visibility = 'visible';
+                video.style.opacity = '1';
+                void video.offsetWidth; // Force reflow
+            }
+
+            // Update video element with stream
+            if (video) {
+                // Ensure video element properties
+                video.muted = false;
+                video.autoplay = true;
+                video.playsInline = true;
+                video.setAttribute('playsinline', 'true');
+                video.setAttribute('webkit-playsinline', 'true');
+                
+                // CRITICAL FIX: Always create a fresh stream reference and set it
+                // This ensures the video element detects the new stream
+                const hasVideoTrack = stream.getVideoTracks().length > 0;
+                const currentSrcObject = video.srcObject;
+                
+                console.log(`🔄 Updating video element srcObject for ${socketId}`);
+                console.log(`   Has video track: ${hasVideoTrack}`);
+                console.log(`   Current srcObject: ${currentSrcObject ? 'exists' : 'null'}`);
+                console.log(`   New stream tracks: ${stream.getTracks().length}`);
+                
+                // CRITICAL: Ensure video element is in DOM and visible before setting stream
+                if (!video.parentElement) {
+                    console.error(`❌ Video element not in DOM!`);
+                    videoContainer.appendChild(video);
+                }
+                
+                // Ensure video element is visible
+                video.style.display = 'block';
+                video.style.visibility = 'visible';
+                video.style.opacity = '1';
+                
+                // Force a reflow to ensure browser processes the element
+                void video.offsetWidth;
+                
+                // Always clear and reset to force video element to reload
+                video.pause();
+                video.srcObject = null;
+                video.removeAttribute('src');
+                
+                // Wait for next frame to ensure DOM update
+                await new Promise(resolve => requestAnimationFrame(resolve));
+                await new Promise(resolve => setTimeout(resolve, 50));
+                
+                // Set stream directly - simple and direct approach
+                video.srcObject = stream;
+                console.log(`✅ Video srcObject set directly to stream for ${socketId}`);
+                console.log(`✅ Video srcObject set to new stream for ${socketId}`);
+                
+                // Force another reflow
+                void video.offsetWidth;
+                
+                // For video tracks, try to play immediately
+                if (kind === 'video') {
+                    // Don't call load() - let the browser handle it naturally
+                    // Just try to play
+                    try {
+                        await video.play();
+                        console.log(`✅ Video play() called immediately for ${socketId}`);
+                    } catch (playError) {
+                        console.log(`⚠️ Immediate play() failed (will retry):`, playError.message);
+                    }
+                }
+                
+                // Verify video element has the stream
+                if (video.srcObject !== stream) {
+                    console.error(`❌ CRITICAL: Video element srcObject was not set correctly!`);
+                    video.srcObject = stream; // Try again
+                    // Force reflow
+                    void video.offsetWidth;
+                }
+                
+                // Verify video element can see the tracks
+                const videoElementTracks = video.srcObject ? video.srcObject.getTracks() : [];
+                console.log(`📊 Video element tracks: ${videoElementTracks.length}`);
+                videoElementTracks.forEach(t => {
+                    console.log(`     - ${t.kind} track: ${t.id}, enabled: ${t.enabled}, readyState: ${t.readyState}`);
+                });
+                
+                // For video tracks, verify the video element can see it
+                if (kind === 'video') {
+                    const videoElementVideoTracks = video.srcObject ? video.srcObject.getVideoTracks() : [];
+                    if (videoElementVideoTracks.length === 0) {
+                        console.error(`❌ CRITICAL: Video element has NO video tracks after setting srcObject!`);
+                        console.error(`   Stream has ${stream.getVideoTracks().length} video tracks`);
+                        console.error(`   This indicates the video element is not detecting the video track!`);
+                    } else {
+                        console.log(`✅ Video element has ${videoElementVideoTracks.length} video track(s)`);
+                        videoElementVideoTracks.forEach(vt => {
+                            console.log(`     Video track: ${vt.id}, enabled: ${vt.enabled}, readyState: ${vt.readyState}`);
+                            try {
+                                const settings = vt.getSettings();
+                                console.log(`       Settings: ${JSON.stringify(settings)}`);
+                            } catch (e) {
+                                console.warn(`       Could not get settings:`, e);
+                            }
+                        });
+                    }
+                }
+                
+                // Log stream details
+                console.log(`📺 Video element updated for ${socketId}`);
+                console.log(`   Stream has ${stream.getTracks().length} tracks`);
+                console.log(`   Stream video tracks: ${stream.getVideoTracks().length}`);
+                console.log(`   Stream audio tracks: ${stream.getAudioTracks().length}`);
+                console.log(`   Video element srcObject: ${video.srcObject ? 'set' : 'null'}`);
+                console.log(`   Video element paused: ${video.paused}`);
+                console.log(`   Video element readyState: ${video.readyState}`);
+                
+                // Log all tracks in stream
+                stream.getTracks().forEach(t => {
+                    console.log(`     Stream track: ${t.id}, kind: ${t.kind}, enabled: ${t.enabled}, readyState: ${t.readyState}`);
+                });
+                
+                // Force play with multiple attempts
+                const playVideo = async (attempt = 1) => {
+                    try {
+                        if (video.srcObject && video.srcObject.getTracks().length > 0) {
+                            // Check if video has video tracks before playing
+                            const hasVideo = video.srcObject.getVideoTracks().length > 0;
+                            if (hasVideo || kind === 'audio') {
+                                await video.play();
+                                console.log(`✅ Video playing for ${socketId} (attempt ${attempt})`);
+                                console.log(`   Video element paused: ${video.paused}`);
+                                console.log(`   Video element currentTime: ${video.currentTime}`);
+                                console.log(`   Video element readyState: ${video.readyState}`);
+                                console.log(`   Video dimensions: ${video.videoWidth}x${video.videoHeight}`);
+                            } else {
+                                console.warn(`⚠️ No video tracks in stream, skipping play`);
+                            }
+                        } else {
+                            console.warn(`⚠️ Cannot play: video has no srcObject or tracks`);
+                        }
+                    } catch (err) {
+                        console.warn(`⚠️ Play attempt ${attempt} failed for ${socketId}:`, err.message);
+                        if (attempt < 5) {
+                            setTimeout(() => playVideo(attempt + 1), 500 * attempt);
+                        } else {
+                            console.error(`❌ Failed to play video for ${socketId} after ${attempt} attempts`);
+                        }
+                    }
+                };
+                
+                // Try to play after delays to ensure srcObject is properly set
+                setTimeout(() => playVideo(), 200);
+                setTimeout(() => playVideo(), 500);
+                
+                // Monitor video element events
+                video.onloadedmetadata = () => {
+                    console.log(`📹 Video metadata loaded for ${socketId}, dimensions: ${video.videoWidth}x${video.videoHeight}`);
+                    playVideo();
+                };
+                
+                video.oncanplay = () => {
+                    console.log(`▶️ Video can play for ${socketId}`);
+                    playVideo();
+                };
+                
+                video.onplaying = () => {
+                    console.log(`▶️ Video is now playing for ${socketId}`);
+                    console.log(`   Video dimensions: ${video.videoWidth}x${video.videoHeight}`);
+                    console.log(`   Video element visible: ${video.offsetWidth > 0 && video.offsetHeight > 0}`);
+                    if (video.videoWidth === 0 || video.videoHeight === 0) {
+                        console.warn(`⚠️ Video has zero dimensions! Video track may not be producing frames!`);
+                        // Force reload
+                        const currentSrc = video.srcObject;
+                        video.pause();
+                        video.srcObject = null;
+                        setTimeout(() => {
+                            video.srcObject = currentSrc;
+                            video.play().catch(e => console.error('Reload play failed:', e));
+                        }, 200);
+                    }
+                };
+                
+                // Monitor video dimensions - critical for debugging
+                let dimensionCheckCount = 0;
+                const checkVideoDimensions = setInterval(() => {
+                    dimensionCheckCount++;
+                    if (video.videoWidth > 0 && video.videoHeight > 0) {
+                        console.log(`✅ Video has dimensions: ${video.videoWidth}x${video.videoHeight} for ${socketId}`);
+                        clearInterval(checkVideoDimensions);
+                    } else if (video.srcObject && video.srcObject.getVideoTracks().length > 0) {
+                        console.warn(`⚠️ [${dimensionCheckCount}] Video element has no dimensions but has video tracks for ${socketId}`);
+                        if (dimensionCheckCount <= 5) {
+                            // Force reload
+                            const currentSrc = video.srcObject;
+                            video.pause();
+                            video.srcObject = null;
+                            setTimeout(() => {
+                                video.srcObject = currentSrc;
+                                video.play().catch(e => console.error('Reload play failed:', e));
+                            }, 200 * dimensionCheckCount);
+                        } else {
+                            console.error(`❌ Video still has no dimensions after ${dimensionCheckCount} attempts!`);
+                            console.error(`   This indicates the video track is not producing frames!`);
+                        }
+                    }
+                }, 1000);
+                
+                // Clear interval after 15 seconds
+                setTimeout(() => {
+                    clearInterval(checkVideoDimensions);
+                    if (video.videoWidth === 0 || video.videoHeight === 0) {
+                        console.error(`❌ FINAL: Video element still has no dimensions for ${socketId} after 15 seconds!`);
+                    }
+                }, 15000);
+                
+                video.onplay = () => {
+                    console.log(`▶️ Video started playing for ${socketId}`);
+                };
+                
+                video.onerror = (e) => {
+                    console.error(`❌ Video error for ${socketId}:`, e);
+                    console.error(`   Error details:`, video.error);
+                };
+                
+                // Check if we have video tracks
+                const videoTracks = stream.getVideoTracks();
+                if (videoTracks.length === 0 && kind === 'video') {
+                    console.warn(`⚠️ No video tracks in stream for ${socketId} after adding ${kind} track`);
+                } else if (videoTracks.length > 0) {
+                    console.log(`✅ Video track present in stream for ${socketId}`);
+                }
+            } else {
+                console.error(`❌ Video element not found for socket ${socketId}`);
+            }
+            
+            console.log(`\n✅ addRemoteVideo completed for producer ${producerId}\n`);
+        }
+
+        function removeParticipant(socketId) {
+            // Find all producers for this socket and remove their consumers
+            const producersToRemove = [];
+            for (const [producerId, sId] of producerToSocket.entries()) {
+                if (sId === socketId) {
+                    producersToRemove.push(producerId);
+                }
+            }
+
+            // Remove consumers
+            for (const producerId of producersToRemove) {
+                const consumer = consumers.get(producerId);
+                if (consumer) {
+                    consumer.close();
+                    consumers.delete(producerId);
+                }
+                producerToSocket.delete(producerId);
+            }
+            
+            // Remove stream tracking
+            socketToStream.delete(socketId);
+            
+            // Remove video element
+            const videoContainer = document.getElementById(`remote-${socketId}`);
+            if (videoContainer) {
+                videoContainer.remove();
+            }
+        }
+
+        async function toggleAudio() {
+            if (localStream) {
+                const audioTrack = localStream.getAudioTracks()[0];
+                if (audioTrack) {
+                    isAudioEnabled = !isAudioEnabled;
+                    audioTrack.enabled = isAudioEnabled;
+                    
+                    const btn = document.getElementById('toggleAudio');
+                    btn.textContent = isAudioEnabled ? '🔊 Unmute' : '🔇 Mute';
+                    btn.classList.toggle('muted', !isAudioEnabled);
+                }
+            }
+        }
+
+        async function toggleVideo() {
+            if (localStream) {
+                const videoTrack = localStream.getVideoTracks()[0];
+                if (videoTrack) {
+                    isVideoEnabled = !isVideoEnabled;
+                    videoTrack.enabled = isVideoEnabled;
+                    
+                    const btn = document.getElementById('toggleVideo');
+                    btn.textContent = isVideoEnabled ? '📹 Video On' : '📷 Video Off';
+                    btn.classList.toggle('video-off', !isVideoEnabled);
+
+                    // Toggle local video display
+                    const localVideo = document.querySelector('#local-video video');
+                    if (localVideo) {
+                        localVideo.style.display = isVideoEnabled ? 'block' : 'none';
+                    }
+                }
+            }
+        }
+
+        async function leaveRoom() {
+            try {
+                // Stop local stream
+                if (localStream) {
+                    localStream.getTracks().forEach(track => track.stop());
+                }
+
+                // Close producers
+                for (const producer of producers.values()) {
+                    producer.close();
+                }
+                producers.clear();
+
+                // Close consumers
+                for (const consumer of consumers.values()) {
+                    consumer.close();
+                }
+                consumers.clear();
+                producerToSocket.clear();
+                socketToStream.clear();
+
+                // Close transports
+                if (sendTransport) {
+                    sendTransport.close();
+                }
+                if (recvTransport) {
+                    recvTransport.close();
+                }
+
+                // Leave room via socket
+                if (socket) {
+                    socket.emit('leaveRoom');
+                    socket.disconnect();
+                }
+
+                // Reset UI
+                document.getElementById('videoSection').classList.remove('active');
+                document.getElementById('setupSection').style.display = 'block';
+                document.getElementById('videoGrid').innerHTML = '';
+                document.getElementById('usersList').style.display = 'none';
+                updateStatus('disconnected');
+
+            } catch (error) {
+                console.error('Error leaving room:', error);
+            }
+        }
+
+        async function loadUsers() {
+            try {
+                const response = await fetch(`${SERVER_URL}/users`);
+                const users = await response.json();
+                
+                const container = document.getElementById('usersContainer');
+                if (users.length === 0) {
+                    container.innerHTML = '<div class="loading">No users found</div>';
+                    return;
+                }
+
+                container.innerHTML = users.map(user => `
+                    <div class="user-item">
+                        <div>
+                            <strong>${user.username || 'Unknown'}</strong>
+                            <div style="font-size: 12px; color: #6b7280;">${user.email || ''}</div>
+                        </div>
+                    </div>
+                `).join('');
+
+            } catch (error) {
+                console.error('Error loading users:', error);
+                document.getElementById('usersContainer').innerHTML = 
+                    '<div class="loading">Error loading users</div>';
+            }
+        }
+
+        function socketRequest(event, data = {}) {
+            return new Promise((resolve, reject) => {
+                if (!socket) {
+                    reject(new Error('Socket not connected'));
+                    return;
+                }
+
+                socket.emit(event, data, (response) => {
+                    if (response.error) {
+                        reject(new Error(response.error));
+                    } else {
+                        resolve(response);
+                    }
+                });
+            });
+        }
+
+        function updateStatus(status) {
+            const statusEl = document.getElementById('status');
+            statusEl.className = 'status ' + status;
+            
+            const statusText = {
+                'disconnected': 'Disconnected',
+                'connecting': 'Connecting...',
+                'connected': 'Connected',
+                'in-call': 'In Call'
+            };
+            
+            statusEl.textContent = statusText[status] || status;
+        }
+
+        function showError(message) {
+            const errorEl = document.getElementById('error');
+            errorEl.textContent = message;
+            errorEl.classList.add('show');
+            setTimeout(() => {
+                errorEl.classList.remove('show');
+            }, 5000);
+        }
+
+        // Load users on page load
+        window.addEventListener('load', () => {
+            loadUsers();
+        });
+    </script>
+</body>
 </html>
