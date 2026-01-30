@@ -432,6 +432,19 @@
         let isAudioEnabled = true;
         let isVideoEnabled = true;
 
+        // Helper function to check device availability
+        async function checkDeviceAvailability() {
+            try {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const hasVideo = devices.some(device => device.kind === 'videoinput');
+                const hasAudio = devices.some(device => device.kind === 'audioinput');
+                return { hasVideo, hasAudio, devices };
+            } catch (error) {
+                console.warn('Could not enumerate devices:', error);
+                return { hasVideo: true, hasAudio: true, devices: [] };
+            }
+        }
+
         // Initialize
         async function connect() {
             try {
@@ -440,6 +453,19 @@
 
                 if (!username || !roomId) {
                     showError('Please enter your name and room ID');
+                    return;
+                }
+
+                // Clean up any existing streams before connecting (important for Edge)
+                if (localStream) {
+                    localStream.getTracks().forEach(track => track.stop());
+                    localStream = null;
+                }
+
+                // Check device availability
+                const deviceCheck = await checkDeviceAvailability();
+                if (!deviceCheck.hasVideo && !deviceCheck.hasAudio) {
+                    showError('No camera or microphone found. Please connect a device and refresh the page.');
                     return;
                 }
 
@@ -459,37 +485,25 @@
                 });
 
                 socket.on('newProducer', async ({ producerId, kind, socketId }) => {
-                    console.log('🔔 New producer event received:', { producerId, kind, socketId });
-                    
-                    if (socketId === socket.id) {
-                        console.log('⚠️ Ignoring own producer');
-                        return;
-                    }
+                    if (socketId === socket.id) return;
 
-                    // Wait for recv transport and device to be ready
+                    // Optimized: Faster retries with shorter intervals (max 1.5s instead of 6s)
                     let retries = 0;
-                    while ((!recvTransport || !device || !device.loaded) && retries < 30) {
-                        await new Promise(resolve => setTimeout(resolve, 200));
+                    while ((!recvTransport || !device || !device.loaded) && retries < 15) {
+                        await new Promise(resolve => setTimeout(resolve, 100));
                         retries++;
                     }
 
-                    if (!recvTransport) {
-                        console.error(`❌ Recv transport not ready after waiting, cannot consume producer ${producerId}`);
+                    if (!recvTransport || !device || !device.loaded) {
+                        console.error(`❌ Not ready for producer ${producerId}`);
                         return;
                     }
 
-                    if (!device || !device.loaded) {
-                        console.error(`❌ Device not loaded after waiting, cannot consume producer ${producerId}`);
-                        return;
-                    }
-
-                    console.log(`📥 Consuming new producer: ${producerId} (${kind}) from ${socketId}`);
                     producerToSocket.set(producerId, socketId);
-                    
                     try {
                         await consumeProducer(producerId, kind);
                     } catch (error) {
-                        console.error(`❌ Failed to consume new producer ${producerId}:`, error);
+                        console.error(`❌ Failed to consume producer ${producerId}:`, error);
                     }
                 });
 
@@ -527,46 +541,37 @@
                 await device.load({ routerRtpCapabilities: rtpCapabilities });
                 console.log('Device loaded');
 
-                // Create send transport
-                await createSendTransport();
+                // Create transports in parallel for faster connection
+                await Promise.all([
+                    createSendTransport(),
+                    createRecvTransport()
+                ]);
 
-                // Create recv transport
-                await createRecvTransport();
-                
-                // Wait for transports to be ready
-                await new Promise(resolve => setTimeout(resolve, 800));
+                // Optimized: Minimal wait (100ms instead of 800ms)
+                await new Promise(resolve => setTimeout(resolve, 100));
 
                 // Start producing local media
                 await produceMedia();
                 
-                // Wait for producers to be registered
-                await new Promise(resolve => setTimeout(resolve, 500));
+                // Optimized: Minimal wait (100ms instead of 500ms)
+                await new Promise(resolve => setTimeout(resolve, 100));
 
-                // Get existing producers
+                // Get existing producers and consume in parallel
                 const { producers: existingProducers } = await socketRequest('getProducers');
-                console.log('📋 Existing producers in room:', existingProducers);
 
-                // Consume existing producers
+                // Consume existing producers in parallel for faster connection
                 if (recvTransport && device && device.loaded) {
-                    for (const producer of existingProducers) {
-                        if (producer.socketId === socket.id) {
-                            console.log(`⚠️ Skipping own producer ${producer.id}`);
-                            continue;
-                        }
-                        
-                        console.log(`📥 Consuming existing producer: ${producer.id} (${producer.kind}) from ${producer.socketId}`);
-                        producerToSocket.set(producer.id, producer.socketId);
-                        
-                        try {
-                            await consumeProducer(producer.id, producer.kind);
-                            // Small delay between consumers
-                            await new Promise(resolve => setTimeout(resolve, 200));
-                        } catch (error) {
-                            console.error(`❌ Failed to consume producer ${producer.id}:`, error);
-                        }
-                    }
-                } else {
-                    console.warn('⚠️ Cannot consume producers: recvTransport or device not ready');
+                    const consumePromises = existingProducers
+                        .filter(producer => producer.socketId !== socket.id)
+                        .map(async (producer) => {
+                            producerToSocket.set(producer.id, producer.socketId);
+                            try {
+                                await consumeProducer(producer.id, producer.kind);
+                            } catch (error) {
+                                console.error(`❌ Failed to consume producer ${producer.id}:`, error);
+                            }
+                        });
+                    await Promise.all(consumePromises);
                 }
 
                 // Initialize button states
@@ -673,14 +678,132 @@
             });
         }
 
-        async function produceMedia() {
+        // Check permission state before requesting
+        async function checkPermissions() {
             try {
-                // Get user media
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    audio: true,
-                    video: { width: 1280, height: 720 },
-                });
+                if (navigator.permissions && navigator.permissions.query) {
+                    const cameraPermission = await navigator.permissions.query({ name: 'camera' }).catch(() => null);
+                    const microphonePermission = await navigator.permissions.query({ name: 'microphone' }).catch(() => null);
+                    
+                    if (cameraPermission && cameraPermission.state === 'denied') {
+                        return { denied: true, reason: 'Camera permission was denied. Please enable it in browser settings.' };
+                    }
+                    if (microphonePermission && microphonePermission.state === 'denied') {
+                        return { denied: true, reason: 'Microphone permission was denied. Please enable it in browser settings.' };
+                    }
+                }
+                return { denied: false };
+            } catch (e) {
+                // Permissions API not supported, continue anyway
+                return { denied: false };
+            }
+        }
 
+        async function produceMedia() {
+            // Clean up any existing stream first (important for Edge)
+            if (localStream) {
+                localStream.getTracks().forEach(track => {
+                    track.stop();
+                });
+                localStream = null;
+            }
+
+            // Wait a bit for device to be released (especially for Edge)
+            await new Promise(resolve => setTimeout(resolve, 300));
+
+            // Check permissions first
+            const permissionCheck = await checkPermissions();
+            if (permissionCheck.denied) {
+                showError(permissionCheck.reason);
+                throw new Error('Permission denied');
+            }
+
+            // Check if getUserMedia is available
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                const error = new Error('getUserMedia is not supported in this browser');
+                showError(error.message);
+                throw error;
+            }
+
+            let stream = null;
+            let lastError = null;
+
+            // Try with ideal constraints first
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
+                    },
+                    video: {
+                        width: { ideal: 1280, max: 1920 },
+                        height: { ideal: 720, max: 1080 },
+                        frameRate: { ideal: 30, max: 60 }
+                    }
+                });
+            } catch (error) {
+                lastError = error;
+                
+                // If permission denied, stop immediately - don't retry
+                if (error.name === 'NotAllowedError') {
+                    showError('Permission denied. Please allow camera/microphone access and try again.');
+                    throw error;
+                }
+                
+                // If device not found, stop immediately
+                if (error.name === 'NotFoundError') {
+                    showError('No camera/microphone found. Please connect a device and try again.');
+                    throw error;
+                }
+                
+                // If overconstrained, try with basic constraints
+                if (error.name === 'OverconstrainedError' || error.name === 'NotReadableError') {
+                    console.warn('⚠️ Trying with basic constraints...');
+                    try {
+                        stream = await navigator.mediaDevices.getUserMedia({
+                            audio: true,
+                            video: true
+                        });
+                    } catch (fallbackError) {
+                        lastError = fallbackError;
+                        
+                        // If still permission denied, stop
+                        if (fallbackError.name === 'NotAllowedError') {
+                            showError('Permission denied. Please allow camera/microphone access and try again.');
+                            throw fallbackError;
+                        }
+                        
+                        // If device in use, wait and retry once more
+                        if (fallbackError.name === 'NotReadableError') {
+                            console.warn('⚠️ Device in use, waiting 1 second before final attempt...');
+                            await new Promise(resolve => setTimeout(resolve, 1000));
+                            
+                            try {
+                                stream = await navigator.mediaDevices.getUserMedia({
+                                    audio: true,
+                                    video: true
+                                });
+                            } catch (finalError) {
+                                showError('Device is in use by another application. Please close other apps using the camera/microphone and refresh the page.');
+                                throw finalError;
+                            }
+                        } else {
+                            throw fallbackError;
+                        }
+                    }
+                } else {
+                    throw error;
+                }
+            }
+
+            if (!stream) {
+                const error = new Error('Failed to get media stream');
+                showError(error.message);
+                throw error;
+            }
+
+            try {
                 localStream = stream;
                 addLocalVideo(stream);
 
@@ -689,7 +812,6 @@
                 if (audioTrack) {
                     const audioProducer = await sendTransport.produce({ track: audioTrack });
                     producers.set('audio', audioProducer);
-                    // Also store by producer ID for tracking
                     producers.set(audioProducer.id, audioProducer);
                     console.log(`✅ Audio producer created: ${audioProducer.id}`);
                 }
@@ -699,59 +821,43 @@
                 if (videoTrack) {
                     const videoProducer = await sendTransport.produce({ track: videoTrack });
                     producers.set('video', videoProducer);
-                    // Also store by producer ID for tracking
                     producers.set(videoProducer.id, videoProducer);
                     console.log(`✅ Video producer created: ${videoProducer.id}`);
                 }
 
             } catch (error) {
+                // Clean up stream if production fails
+                if (stream) {
+                    stream.getTracks().forEach(track => track.stop());
+                    localStream = null;
+                }
                 console.error('Error producing media:', error);
-                showError('Failed to access camera/microphone: ' + error.message);
+                showError('Failed to start media production: ' + error.message);
+                throw error;
             }
         }
 
         async function consumeProducer(producerId, kind = null) {
             try {
-                if (consumers.has(producerId)) {
-                    console.log(`⚠️ Already consuming producer ${producerId}, skipping`);
-                    return;
-                }
+                if (consumers.has(producerId)) return;
 
-                if (!recvTransport) {
-                    throw new Error('Recv transport not ready');
-                }
-
-                if (!device || !device.loaded) {
-                    throw new Error('Device not loaded');
+                if (!recvTransport || !device || !device.loaded) {
+                    throw new Error('Not ready');
                 }
 
                 const socketId = producerToSocket.get(producerId);
-                if (!socketId) {
-                    console.warn(`⚠️ No socketId found for producer ${producerId}`);
-                }
+                if (socketId === socket.id) return;
 
-                if (socketId === socket.id) {
-                    console.log(`⚠️ Skipping own producer ${producerId}`);
-                    return;
-                }
-
-                // Wait for transport to be connected (with timeout)
+                // Optimized: Faster retries (max 300ms instead of 2000ms)
                 let retries = 0;
                 while (
                     recvTransport.connectionState !== 'connected' &&
                     recvTransport.connectionState !== 'completed' &&
-                    retries < 20
+                    retries < 6
                 ) {
-                    await new Promise(resolve => setTimeout(resolve, 100));
+                    await new Promise(resolve => setTimeout(resolve, 50));
                     retries++;
                 }
-
-                if (recvTransport.connectionState !== 'connected' && 
-                    recvTransport.connectionState !== 'completed') {
-                    console.warn(`⚠️ Recv transport state: ${recvTransport.connectionState}, proceeding anyway...`);
-                }
-
-                console.log(`📥 Consuming producer ${producerId} (${kind}) from socket ${socketId}...`);
                 
                 // Request consumer creation from server
                 const { id, producerId: prodId, kind: mediaKind, rtpParameters } = await socketRequest('consume', {
@@ -760,9 +866,7 @@
                     rtpCapabilities: device.rtpCapabilities,
                 });
 
-                console.log(`Server created consumer ${id} for producer ${prodId}`);
-
-                // Create consumer on the recv transport using server-provided parameters
+                // Create consumer
                 const consumer = await recvTransport.consume({
                     id,
                     producerId: prodId,
@@ -770,154 +874,27 @@
                     rtpParameters,
                 });
 
-                console.log(`Consumer created locally, track ID: ${consumer.track.id}, kind: ${consumer.kind}`);
-                console.log(`Consumer paused state: ${consumer.paused}`);
-                console.log(`Consumer closed state: ${consumer.closed}`);
-
-                // Store consumer by producerId
                 consumers.set(producerId, consumer);
-
-                // Ensure track is enabled
                 consumer.track.enabled = true;
 
-                // Resume consumer on server
-                try {
-                    await socketRequest('resumeConsumer', { consumerId: consumer.id });
-                    console.log(`✅ Consumer ${id} resumed on server`);
-                } catch (error) {
-                    console.warn(`⚠️ Failed to resume consumer on server:`, error);
-                }
+                // Resume consumer (non-blocking)
+                socketRequest('resumeConsumer', { consumerId: consumer.id }).catch(() => {});
 
-                // Wait a bit for video tracks
-                if (mediaKind === 'video') {
-                    await new Promise(resolve => setTimeout(resolve, 300));
-                }
-
-                // Get track and add to video element
+                // Get track and add to video element immediately
                 const { track } = consumer;
+                if (!track) throw new Error('Consumer has no track');
                 
-                if (!track) {
-                    console.error(`❌ No track in consumer for producer ${producerId}`);
-                    throw new Error('Consumer has no track');
-                }
-                
-                // Ensure track is enabled and active
-                track.enabled = true;
-                
-                console.log(`✅ Consuming ${mediaKind} track from producer ${producerId}`);
-                console.log(`   Track ID: ${track.id}`);
-                console.log(`   Track enabled: ${track.enabled}`);
-                console.log(`   Track readyState: ${track.readyState}`);
-                console.log(`   Track muted: ${track.muted}`);
-                console.log(`   Track settings:`, track.getSettings ? track.getSettings() : 'N/A');
-                console.log(`   Track constraints:`, track.getConstraints ? track.getConstraints() : 'N/A');
-                
-                // Wait a bit for track to become active (especially for video tracks)
-                if (mediaKind === 'video') {
-                    console.log(`⏳ Waiting for video track to become active...`);
-                    let waitCount = 0;
-                    while (track.readyState !== 'live' && waitCount < 50) {
-                        await new Promise(resolve => setTimeout(resolve, 100));
-                        waitCount++;
-                    }
-                    if (track.readyState === 'live') {
-                        console.log(`✅ Video track is now live after ${waitCount * 100}ms`);
-                    } else {
-                        console.warn(`⚠️ Video track readyState is still ${track.readyState} after waiting`);
-                    }
-                }
-                
-                // Monitor track state
+                // Monitor track state (minimal)
                 track.onended = () => {
-                    console.log(`🔴 Track ${track.id} ended`);
-                    // Remove the track from the stream
                     const socketId = producerToSocket.get(producerId);
                     if (socketId) {
                         const stream = socketToStream.get(socketId);
-                        if (stream) {
-                            stream.removeTrack(track);
-                        }
+                        if (stream) stream.removeTrack(track);
                     }
                 };
-                track.onmute = () => {
-                    console.log(`🔇 Track ${track.id} muted`);
-                };
-                track.onunmute = () => {
-                    console.log(`🔊 Track ${track.id} unmuted`);
-                    track.enabled = true;
-                };
                 
-                // Monitor track state changes
-                if (track.addEventListener) {
-                    track.addEventListener('ended', () => {
-                        console.log(`🔴 Track ${track.id} ended (via addEventListener)`);
-                    });
-                }
-                
-                // CRITICAL: For video tracks, verify consumer is actually receiving data
-                if (mediaKind === 'video') {
-                    // Wait a moment for consumer to start receiving
-                    await new Promise(resolve => setTimeout(resolve, 500));
-                    
-                    // Check consumer state
-                    console.log(`📊 Consumer state check:`);
-                    console.log(`   Consumer paused: ${consumer.paused}`);
-                    console.log(`   Consumer closed: ${consumer.closed}`);
-                    console.log(`   Track readyState: ${track.readyState}`);
-                    console.log(`   Track enabled: ${track.enabled}`);
-                    
-                    // CRITICAL: Verify track is receiving frames using canvas
-                    try {
-                        const canvas = document.createElement('canvas');
-                        const ctx = canvas.getContext('2d');
-                        const testStream = new MediaStream([track]);
-                        const testVideo = document.createElement('video');
-                        testVideo.srcObject = testStream;
-                        testVideo.muted = true;
-                        testVideo.playsInline = true;
-                        
-                        await new Promise((resolve) => {
-                            testVideo.onloadedmetadata = () => {
-                                testVideo.play().then(() => {
-                                    // Try to draw a frame after a short delay
-                                    setTimeout(() => {
-                                        try {
-                                            canvas.width = testVideo.videoWidth || 640;
-                                            canvas.height = testVideo.videoHeight || 480;
-                                            ctx.drawImage(testVideo, 0, 0);
-                                            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                                            const hasData = imageData.data.some(pixel => pixel !== 0);
-                                            if (hasData) {
-                                                console.log(`✅ Track IS producing frames! Canvas test successful`);
-                                            } else {
-                                                console.warn(`⚠️ Track may not be producing frames - canvas is blank`);
-                                            }
-                                            testVideo.srcObject = null;
-                                            resolve();
-                                        } catch (e) {
-                                            console.warn(`⚠️ Canvas test error:`, e.message);
-                                            resolve();
-                                        }
-                                    }, 500);
-                                }).catch(e => {
-                                    console.warn(`⚠️ Test video play failed:`, e.message);
-                                    resolve();
-                                });
-                            };
-                            testVideo.onerror = () => {
-                                console.warn(`⚠️ Test video error`);
-                                resolve();
-                            };
-                        });
-                    } catch (e) {
-                        console.warn(`⚠️ Frame verification test failed:`, e.message);
-                    }
-                }
-                
-                // Add track to video element
-                console.log(`🎬 Adding ${mediaKind} track to video element for producer ${producerId}`);
+                // Add track to video element immediately (no waiting)
                 await addRemoteVideo(track, producerId, mediaKind);
-                console.log(`✅ Track added to video element for producer ${producerId}`);
 
             } catch (error) {
                 console.error('Error consuming producer:', error);
@@ -948,384 +925,53 @@
         }
 
         async function addRemoteVideo(track, producerId, kind) {
-            console.log(`\n🎬 addRemoteVideo called: producerId=${producerId}, kind=${kind}, trackId=${track.id}`);
-            
             const socketId = producerToSocket.get(producerId);
-            if (!socketId) {
-                console.error('❌ CRITICAL ERROR: No socketId found for producer:', producerId);
-                console.error('   Current producerToSocket map:', Array.from(producerToSocket.entries()));
-                console.error('   This track will NOT be displayed!');
-                return;
-            }
-            
-            console.log(`✅ Found socketId: ${socketId} for producer ${producerId}`);
+            if (!socketId) return;
 
             const videoGrid = document.getElementById('videoGrid');
-            
-            // SIMPLIFIED: Use ONE stream per socket, just add/remove tracks
             let stream = socketToStream.get(socketId);
             
             if (!stream) {
-                // First track - create new stream
                 stream = new MediaStream();
-                stream.addTrack(track);
                 socketToStream.set(socketId, stream);
-                console.log(`📦 Created NEW stream for socket ${socketId} with ${kind} track`);
-            } else {
-                // Check if track already exists in stream
-                const existingTrack = stream.getTracks().find(t => t.id === track.id);
-                if (!existingTrack) {
-                    // Just add the track to existing stream
-                    stream.addTrack(track);
-                    console.log(`✅ Added ${kind} track to existing stream for socket ${socketId}`);
-                } else {
-                    console.log(`⚠️ Track ${track.id} already in stream, skipping`);
-                }
             }
             
-            // Verify track is in stream
-            const existingTrack = stream.getTracks().find(t => t.id === track.id);
-            if (!existingTrack) {
-                console.error(`❌ Track ${track.id} was not added to stream!`);
-                throw new Error(`Track ${track.id} was not added to stream`);
+            if (!stream.getTracks().find(t => t.id === track.id)) {
+                stream.addTrack(track);
             }
             
-            // Ensure track is enabled and active
             track.enabled = true;
-            console.log(`✅ Track enabled: ${track.enabled}, readyState: ${track.readyState}, kind: ${track.kind}`);
             
-            // For video tracks, verify it's live and producing frames
-            if (kind === 'video') {
-                if (track.readyState !== 'live') {
-                    console.warn(`⚠️ Video track readyState is ${track.readyState}, expected 'live'`);
-                    // Wait a bit more for it to become live
-                    let waitCount = 0;
-                    while (track.readyState !== 'live' && waitCount < 20) {
-                        await new Promise(resolve => setTimeout(resolve, 100));
-                        waitCount++;
-                    }
-                    if (track.readyState !== 'live') {
-                        console.error(`❌ Video track never became live! Current state: ${track.readyState}`);
-                    } else {
-                        console.log(`✅ Video track became live after ${waitCount * 100}ms`);
-                    }
-                }
-                
-                // Verify track is actually producing frames by checking its settings
-                try {
-                    const settings = track.getSettings();
-                    console.log(`📹 Video track settings:`, settings);
-                    if (settings.width && settings.height) {
-                        console.log(`✅ Video track has dimensions: ${settings.width}x${settings.height}`);
-                    } else {
-                        console.warn(`⚠️ Video track has no dimensions in settings`);
-                    }
-                } catch (e) {
-                    console.warn(`⚠️ Could not get track settings:`, e);
-                }
-            }
-            
-            console.log(`✅ Added ${kind} track to stream for socket ${socketId}`);
-            console.log(`   Track ID: ${track.id}`);
-            console.log(`   Stream now has ${stream.getTracks().length} tracks`);
-            console.log(`   Video tracks: ${stream.getVideoTracks().length}`);
-            console.log(`   Audio tracks: ${stream.getAudioTracks().length}`);
-            
-            // Verify the track is actually in the stream
-            const trackInStream = stream.getTracks().find(t => t.id === track.id);
-            if (!trackInStream) {
-                console.error(`❌ CRITICAL: Track ${track.id} is NOT in stream after adding!`);
-                throw new Error(`Track ${track.id} is not in stream`);
-            }
-            console.log(`✅ Verified track ${track.id} is in stream`);
-            
-            // Check if video container already exists for this socket
+            // Get or create video container
             let videoContainer = document.getElementById(`remote-${socketId}`);
             let video = document.getElementById(`video-${socketId}`);
             
-            if (!videoContainer || !video) {
-                // Create video container if it doesn't exist
-                if (!videoContainer) {
-                    videoContainer = document.createElement('div');
-                    videoContainer.className = 'video-container';
-                    videoContainer.id = `remote-${socketId}`;
-                    videoGrid.appendChild(videoContainer);
-                    
-                    // CRITICAL: Ensure container is visible and has dimensions
-                    videoContainer.style.display = 'block';
-                    videoContainer.style.visibility = 'visible';
-                    void videoContainer.offsetWidth; // Force reflow
-                    
-                    console.log(`📦 Created video container for ${socketId}`);
-                }
-
-                // Create video element if it doesn't exist
-                if (!video) {
-                    video = document.createElement('video');
-                    video.id = `video-${socketId}`;
-                    video.autoplay = true;
-                    video.playsInline = true;
-                    video.muted = false; // Unmute remote audio
-                    video.setAttribute('playsinline', 'true');
-                    video.setAttribute('webkit-playsinline', 'true');
-                    video.style.width = '100%';
-                    video.style.height = '100%';
-                    video.style.objectFit = 'cover';
-                    video.style.display = 'block';
-                    video.style.visibility = 'visible';
-                    video.style.opacity = '1';
-                    video.style.backgroundColor = '#000';
-                    
-                    const label = document.createElement('div');
-                    label.className = 'video-label';
-                    label.textContent = 'Participant';
-
-                    videoContainer.appendChild(video);
-                    videoContainer.appendChild(label);
-                    
-                    // CRITICAL: Wait for element to be in DOM and force reflow
-                    await new Promise(resolve => requestAnimationFrame(resolve));
-                    void video.offsetWidth; // Force reflow
-                    
-                    console.log(`📹 Created new video element for ${socketId}`);
-                }
-            } else {
-                // Ensure existing elements are visible
-                videoContainer.style.display = 'block';
-                videoContainer.style.visibility = 'visible';
-                video.style.display = 'block';
-                video.style.visibility = 'visible';
-                video.style.opacity = '1';
-                void video.offsetWidth; // Force reflow
+            if (!videoContainer) {
+                videoContainer = document.createElement('div');
+                videoContainer.className = 'video-container';
+                videoContainer.id = `remote-${socketId}`;
+                videoGrid.appendChild(videoContainer);
             }
 
-            // Update video element with stream
-            if (video) {
-                // Ensure video element properties
-                video.muted = false;
+            if (!video) {
+                video = document.createElement('video');
+                video.id = `video-${socketId}`;
                 video.autoplay = true;
                 video.playsInline = true;
-                video.setAttribute('playsinline', 'true');
-                video.setAttribute('webkit-playsinline', 'true');
+                video.muted = false;
+                video.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block;background:#000';
                 
-                // CRITICAL FIX: Always create a fresh stream reference and set it
-                // This ensures the video element detects the new stream
-                const hasVideoTrack = stream.getVideoTracks().length > 0;
-                const currentSrcObject = video.srcObject;
+                const label = document.createElement('div');
+                label.className = 'video-label';
+                label.textContent = 'Participant';
                 
-                console.log(`🔄 Updating video element srcObject for ${socketId}`);
-                console.log(`   Has video track: ${hasVideoTrack}`);
-                console.log(`   Current srcObject: ${currentSrcObject ? 'exists' : 'null'}`);
-                console.log(`   New stream tracks: ${stream.getTracks().length}`);
-                
-                // CRITICAL: Ensure video element is in DOM and visible before setting stream
-                if (!video.parentElement) {
-                    console.error(`❌ Video element not in DOM!`);
-                    videoContainer.appendChild(video);
-                }
-                
-                // Ensure video element is visible
-                video.style.display = 'block';
-                video.style.visibility = 'visible';
-                video.style.opacity = '1';
-                
-                // Force a reflow to ensure browser processes the element
-                void video.offsetWidth;
-                
-                // Always clear and reset to force video element to reload
-                video.pause();
-                video.srcObject = null;
-                video.removeAttribute('src');
-                
-                // Wait for next frame to ensure DOM update
-                await new Promise(resolve => requestAnimationFrame(resolve));
-                await new Promise(resolve => setTimeout(resolve, 50));
-                
-                // Set stream directly - simple and direct approach
-                video.srcObject = stream;
-                console.log(`✅ Video srcObject set directly to stream for ${socketId}`);
-                console.log(`✅ Video srcObject set to new stream for ${socketId}`);
-                
-                // Force another reflow
-                void video.offsetWidth;
-                
-                // For video tracks, try to play immediately
-                if (kind === 'video') {
-                    // Don't call load() - let the browser handle it naturally
-                    // Just try to play
-                    try {
-                        await video.play();
-                        console.log(`✅ Video play() called immediately for ${socketId}`);
-                    } catch (playError) {
-                        console.log(`⚠️ Immediate play() failed (will retry):`, playError.message);
-                    }
-                }
-                
-                // Verify video element has the stream
-                if (video.srcObject !== stream) {
-                    console.error(`❌ CRITICAL: Video element srcObject was not set correctly!`);
-                    video.srcObject = stream; // Try again
-                    // Force reflow
-                    void video.offsetWidth;
-                }
-                
-                // Verify video element can see the tracks
-                const videoElementTracks = video.srcObject ? video.srcObject.getTracks() : [];
-                console.log(`📊 Video element tracks: ${videoElementTracks.length}`);
-                videoElementTracks.forEach(t => {
-                    console.log(`     - ${t.kind} track: ${t.id}, enabled: ${t.enabled}, readyState: ${t.readyState}`);
-                });
-                
-                // For video tracks, verify the video element can see it
-                if (kind === 'video') {
-                    const videoElementVideoTracks = video.srcObject ? video.srcObject.getVideoTracks() : [];
-                    if (videoElementVideoTracks.length === 0) {
-                        console.error(`❌ CRITICAL: Video element has NO video tracks after setting srcObject!`);
-                        console.error(`   Stream has ${stream.getVideoTracks().length} video tracks`);
-                        console.error(`   This indicates the video element is not detecting the video track!`);
-                    } else {
-                        console.log(`✅ Video element has ${videoElementVideoTracks.length} video track(s)`);
-                        videoElementVideoTracks.forEach(vt => {
-                            console.log(`     Video track: ${vt.id}, enabled: ${vt.enabled}, readyState: ${vt.readyState}`);
-                            try {
-                                const settings = vt.getSettings();
-                                console.log(`       Settings: ${JSON.stringify(settings)}`);
-                            } catch (e) {
-                                console.warn(`       Could not get settings:`, e);
-                            }
-                        });
-                    }
-                }
-                
-                // Log stream details
-                console.log(`📺 Video element updated for ${socketId}`);
-                console.log(`   Stream has ${stream.getTracks().length} tracks`);
-                console.log(`   Stream video tracks: ${stream.getVideoTracks().length}`);
-                console.log(`   Stream audio tracks: ${stream.getAudioTracks().length}`);
-                console.log(`   Video element srcObject: ${video.srcObject ? 'set' : 'null'}`);
-                console.log(`   Video element paused: ${video.paused}`);
-                console.log(`   Video element readyState: ${video.readyState}`);
-                
-                // Log all tracks in stream
-                stream.getTracks().forEach(t => {
-                    console.log(`     Stream track: ${t.id}, kind: ${t.kind}, enabled: ${t.enabled}, readyState: ${t.readyState}`);
-                });
-                
-                // Force play with multiple attempts
-                const playVideo = async (attempt = 1) => {
-                    try {
-                        if (video.srcObject && video.srcObject.getTracks().length > 0) {
-                            // Check if video has video tracks before playing
-                            const hasVideo = video.srcObject.getVideoTracks().length > 0;
-                            if (hasVideo || kind === 'audio') {
-                                await video.play();
-                                console.log(`✅ Video playing for ${socketId} (attempt ${attempt})`);
-                                console.log(`   Video element paused: ${video.paused}`);
-                                console.log(`   Video element currentTime: ${video.currentTime}`);
-                                console.log(`   Video element readyState: ${video.readyState}`);
-                                console.log(`   Video dimensions: ${video.videoWidth}x${video.videoHeight}`);
-                            } else {
-                                console.warn(`⚠️ No video tracks in stream, skipping play`);
-                            }
-                        } else {
-                            console.warn(`⚠️ Cannot play: video has no srcObject or tracks`);
-                        }
-                    } catch (err) {
-                        console.warn(`⚠️ Play attempt ${attempt} failed for ${socketId}:`, err.message);
-                        if (attempt < 5) {
-                            setTimeout(() => playVideo(attempt + 1), 500 * attempt);
-                        } else {
-                            console.error(`❌ Failed to play video for ${socketId} after ${attempt} attempts`);
-                        }
-                    }
-                };
-                
-                // Try to play after delays to ensure srcObject is properly set
-                setTimeout(() => playVideo(), 200);
-                setTimeout(() => playVideo(), 500);
-                
-                // Monitor video element events
-                video.onloadedmetadata = () => {
-                    console.log(`📹 Video metadata loaded for ${socketId}, dimensions: ${video.videoWidth}x${video.videoHeight}`);
-                    playVideo();
-                };
-                
-                video.oncanplay = () => {
-                    console.log(`▶️ Video can play for ${socketId}`);
-                    playVideo();
-                };
-                
-                video.onplaying = () => {
-                    console.log(`▶️ Video is now playing for ${socketId}`);
-                    console.log(`   Video dimensions: ${video.videoWidth}x${video.videoHeight}`);
-                    console.log(`   Video element visible: ${video.offsetWidth > 0 && video.offsetHeight > 0}`);
-                    if (video.videoWidth === 0 || video.videoHeight === 0) {
-                        console.warn(`⚠️ Video has zero dimensions! Video track may not be producing frames!`);
-                        // Force reload
-                        const currentSrc = video.srcObject;
-                        video.pause();
-                        video.srcObject = null;
-                        setTimeout(() => {
-                            video.srcObject = currentSrc;
-                            video.play().catch(e => console.error('Reload play failed:', e));
-                        }, 200);
-                    }
-                };
-                
-                // Monitor video dimensions - critical for debugging
-                let dimensionCheckCount = 0;
-                const checkVideoDimensions = setInterval(() => {
-                    dimensionCheckCount++;
-                    if (video.videoWidth > 0 && video.videoHeight > 0) {
-                        console.log(`✅ Video has dimensions: ${video.videoWidth}x${video.videoHeight} for ${socketId}`);
-                        clearInterval(checkVideoDimensions);
-                    } else if (video.srcObject && video.srcObject.getVideoTracks().length > 0) {
-                        console.warn(`⚠️ [${dimensionCheckCount}] Video element has no dimensions but has video tracks for ${socketId}`);
-                        if (dimensionCheckCount <= 5) {
-                            // Force reload
-                            const currentSrc = video.srcObject;
-                            video.pause();
-                            video.srcObject = null;
-                            setTimeout(() => {
-                                video.srcObject = currentSrc;
-                                video.play().catch(e => console.error('Reload play failed:', e));
-                            }, 200 * dimensionCheckCount);
-                        } else {
-                            console.error(`❌ Video still has no dimensions after ${dimensionCheckCount} attempts!`);
-                            console.error(`   This indicates the video track is not producing frames!`);
-                        }
-                    }
-                }, 1000);
-                
-                // Clear interval after 15 seconds
-                setTimeout(() => {
-                    clearInterval(checkVideoDimensions);
-                    if (video.videoWidth === 0 || video.videoHeight === 0) {
-                        console.error(`❌ FINAL: Video element still has no dimensions for ${socketId} after 15 seconds!`);
-                    }
-                }, 15000);
-                
-                video.onplay = () => {
-                    console.log(`▶️ Video started playing for ${socketId}`);
-                };
-                
-                video.onerror = (e) => {
-                    console.error(`❌ Video error for ${socketId}:`, e);
-                    console.error(`   Error details:`, video.error);
-                };
-                
-                // Check if we have video tracks
-                const videoTracks = stream.getVideoTracks();
-                if (videoTracks.length === 0 && kind === 'video') {
-                    console.warn(`⚠️ No video tracks in stream for ${socketId} after adding ${kind} track`);
-                } else if (videoTracks.length > 0) {
-                    console.log(`✅ Video track present in stream for ${socketId}`);
-                }
-            } else {
-                console.error(`❌ Video element not found for socket ${socketId}`);
+                videoContainer.appendChild(video);
+                videoContainer.appendChild(label);
             }
-            
-            console.log(`\n✅ addRemoteVideo completed for producer ${producerId}\n`);
+
+            // Set stream immediately (no delays)
+            video.srcObject = stream;
+            video.play().catch(() => {}); // Non-blocking play attempt
         }
 
         function removeParticipant(socketId) {
@@ -1393,10 +1039,17 @@
 
         async function leaveRoom() {
             try {
-                // Stop local stream
+                // Stop local stream first (important for Edge)
                 if (localStream) {
-                    localStream.getTracks().forEach(track => track.stop());
+                    localStream.getTracks().forEach(track => {
+                        track.stop();
+                        track.enabled = false;
+                    });
+                    localStream = null;
                 }
+                
+                // Wait a bit for device to be released (especially for Edge)
+                await new Promise(resolve => setTimeout(resolve, 200));
 
                 // Close producers
                 for (const producer of producers.values()) {
